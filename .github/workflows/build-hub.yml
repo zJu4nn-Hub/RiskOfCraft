@@ -32,7 +32,7 @@ jobs:
 
       - name: Rust link
         working-directory: link
-        run: cargo build --release --locked
+        run: cargo build --release --offline  # sem dependências; o Cargo.lock do upstream ficou na 0.2.0
 
       - name: Fabric mod
         shell: pwsh
