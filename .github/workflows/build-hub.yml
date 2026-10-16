@@ -1,0 +1,91 @@
+# Build used by the zJu4nn Hub "Mashups" tab.
+# - Rust link (link/) and the Minecraft Fabric mod (fabric/) are compiled HERE from this fork's source.
+# - The Risk of Rain 2 BepInEx plugin compiles against the game's own assemblies (not redistributable), so it is
+#   taken from the upstream v0.2.1 release, pinned by sha256 (zip and the dll inside it).
+# Upstream: https://github.com/missingtextures-sudo/RiskOfCraft (MIT), based on SkyCraft by chasmlol (MIT).
+name: build-hub
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. hub-v0.2.1-1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      UP_URL: https://github.com/missingtextures-sudo/RiskOfCraft/releases/download/v0.2.1/RiskOfCraft-0.2.1-windows.zip
+      UP_SHA256: be3cc608b16949f0d881595342270e9d05febf4dab9db7dcff03066a10cca76b
+      PLUGIN_SHA256: 37d7253e4883ce75c190abb6c9c7450e13b83e16521ba0310e20e5267a172c1c
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Rust link
+        working-directory: link
+        run: cargo build --release --locked
+
+      - name: Fabric mod
+        shell: pwsh
+        run: |
+          $env:GRADLE_USER_HOME = Join-Path (Get-Location) '.tools\gradle-home'
+          .\fabric\gradlew.bat -p .\fabric --no-daemon --no-configuration-cache build -x test
+
+      - name: Upstream plugin (pinned)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:UP_URL -OutFile up.zip
+          $h = (Get-FileHash up.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne $env:UP_SHA256) { throw "upstream zip sha256 mismatch: $h" }
+          Expand-Archive up.zip up
+          Expand-Archive up/RiskOfCraft-0.2.1/RiskOfCraft-0.2.1.zip plugin
+          $p = (Get-FileHash plugin/plugins/RiskOfCraft/RiskOfCraft.dll -Algorithm SHA256).Hash.ToLower()
+          if ($p -ne $env:PLUGIN_SHA256) { throw "plugin dll sha256 mismatch: $p" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = ((Get-Content link/Cargo.toml | Where-Object { $_ -match '^version' } | Select-Object -First 1) -split '"')[1]
+          $jar = Get-ChildItem fabric/build/libs -Filter "*.jar" | Where-Object { $_.Name -notmatch 'sources' } | Select-Object -First 1
+          if (!$jar) { throw "mod jar not found" }
+          $p = 'pkg'
+          New-Item -ItemType Directory "$p/BepInEx/plugins/RiskOfCraft","$p/mods" -Force | Out-Null
+          Copy-Item plugin/plugins/RiskOfCraft/RiskOfCraft.dll "$p/BepInEx/plugins/RiskOfCraft/RiskOfCraft.dll"
+          Copy-Item link/target/release/riskofcraft_link.dll "$p/BepInEx/plugins/RiskOfCraft/riskofcraft_link.bin"
+          Copy-Item LICENSE "$p/BepInEx/plugins/RiskOfCraft/LICENSE.txt" -ErrorAction SilentlyContinue
+          Copy-Item THIRD-PARTY-NOTICES.md "$p/BepInEx/plugins/RiskOfCraft/THIRD-PARTY-NOTICES.md" -ErrorAction SilentlyContinue
+          Copy-Item $jar.FullName "$p/mods/$($jar.Name)"
+          @(
+            "RiskOfCraft $ver (build do zJu4nn Hub)",
+            '',
+            'Risk of Rain 2 jogado como um jogador de Minecraft de verdade. Original de missingtextures-sudo',
+            '(github.com/missingtextures-sudo/RiskOfCraft), baseado no SkyCraft de chasmlol. Licenca MIT.',
+            'Projeto de fas, sem ligacao com Hopoo Games, Gearbox, Mojang ou Microsoft.'
+          ) | Set-Content "$p/LEIA.txt" -Encoding utf8
+          $sums = Get-ChildItem $p -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring((Resolve-Path $p).Path.Length + 1).Replace('\','/')
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
+          }
+          $sums | Set-Content "$p/SHA256SUMS.txt" -Encoding ascii
+          $sums
+          $zip = "riskofcraft-hub-$ver.zip"
+          Compress-Archive -Path "$p/*" -DestinationPath $zip
+          "ZIP=$zip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "VER=$ver" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Get-FileHash $zip -Algorithm SHA256 | Format-List
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" $env:ZIP --repo "${{ github.repository }}" --title "RiskOfCraft $env:VER (zJu4nn Hub)" --notes "Build of missingtextures-sudo/RiskOfCraft $env:VER for the zJu4nn Hub Mashups tab. Link and Minecraft mod compiled from this fork at ${{ github.sha }}; the Risk of Rain 2 plugin is the upstream v0.2.1 dll (sha256 $env:PLUGIN_SHA256). MIT."
